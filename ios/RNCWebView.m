@@ -16,6 +16,7 @@
 static NSTimer *keyboardTimer;
 static NSString *const HistoryShimName = @"ReactNativeHistoryShim";
 static NSString *const MessageHandlerName = @"ReactNativeWebView";
+static NSString *const SelectHandlerName = @"ReactNativeSelectDetection";
 static NSURLCredential* clientAuthenticationCredential;
 static NSDictionary* customCertificatesForHost;
 
@@ -75,6 +76,7 @@ static NSDictionary* customCertificatesForHost;
   if ((self = [super initWithFrame:frame])) {
     super.backgroundColor = [UIColor clearColor];
     _bounces = YES;
+    _isSelecting = NO;
     _scrollEnabled = YES;
     _showsHorizontalScrollIndicator = YES;
     _showsVerticalScrollIndicator = YES;
@@ -161,10 +163,12 @@ static NSDictionary* customCertificatesForHost;
     }
     wkWebViewConfig.userContentController = [WKUserContentController new];
 
-    // Shim the HTML5 history API:
+     
+        // Shim the HTML5 history API:
     [wkWebViewConfig.userContentController addScriptMessageHandler:self name:HistoryShimName];
     NSString *source = [NSString stringWithFormat:
-      @"(function(history) {\n"
+      @"console.log(\"***START\")\n"
+      "(function(history) {\n"
       "  function notify(type) {\n"
       "    setTimeout(function() {\n"
       "      window.webkit.messageHandlers.%@.postMessage(type)\n"
@@ -185,20 +189,61 @@ static NSDictionary* customCertificatesForHost;
     ];
     WKUserScript *script = [[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
     [wkWebViewConfig.userContentController addUserScript:script];
-
     if (_messagingEnabled) {
       [wkWebViewConfig.userContentController addScriptMessageHandler:self name:MessageHandlerName];
 
       NSString *source = [NSString stringWithFormat:
-        @"window.%@ = {"
+        @"console.log('***MESSAGE');\n"
+         "window.%@ = {"
          "  postMessage: function (data) {"
          "    window.webkit.messageHandlers.%@.postMessage(String(data));"
          "  }"
          "};", MessageHandlerName, MessageHandlerName
       ];
-
+      
+      [wkWebViewConfig.userContentController addScriptMessageHandler:self name:SelectHandlerName] ;
       WKUserScript *script = [[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
       [wkWebViewConfig.userContentController addUserScript:script];
+
+      NSString *selectSource = [NSString stringWithFormat:
+    @"var sendMessage = function(obj) {\n"
+    "// window.postMessage(JSON.stringify(obj), targetOrigin);\n"
+    "if (!window.ReactNativeWebView.postMessage) {\n"
+      "setTimeout(() => {\n"
+        "sendMessage(obj);\n"
+      "}, 1);\n"
+    "} else {\n"
+      "window.ReactNativeWebView.postMessage(JSON.stringify(obj));\n"
+    "}\n"
+  "};\n"
+    "console.log = function() {\n"
+      "sendMessage({method:'log', value: Array.from(arguments)});\n"
+    "}\n"
+    "console.error = function() {\n"
+      "sendMessage({method:'error', value: Array.from(arguments)});\n"
+    "}\n"
+    "window.%@ = {"
+         "  postMessage: function (data) {"
+         "  console.log('***FN', window.webkit.messageHandlers.%@, data);"
+         "    window.webkit.messageHandlers.%@.postMessage(JSON.stringify(data));"
+         "  }"
+         "};\n"
+
+        "console.log(\"***START\");\n"
+        "(function() {\n"
+          "var getSelectionAndSendMessage = function() {\n"
+              "console.log('***JS EVENT');\n"
+              "var txt = document.getSelection().toString();\n"
+              "window.webkit.messageHandlers.%@.postMessage(txt);\n"
+          "}\n"
+          "document.ontouchstart  = getSelectionAndSendMessage ;\n"
+          "}()) \n", SelectHandlerName, SelectHandlerName, SelectHandlerName, SelectHandlerName
+      ];
+
+    WKUserScript *selectScript = [[WKUserScript alloc] initWithSource:selectSource injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
+    [wkWebViewConfig.userContentController addUserScript:selectScript];
+
+
         
       if (_injectedJavaScriptBeforeContentLoaded) {
         // If user has provided an injectedJavascript prop, execute it at the start of the document
@@ -282,10 +327,15 @@ static NSDictionary* customCertificatesForHost;
         [wkWebViewConfig.userContentController addUserScript:cookieInScript];
       }
     }
+    for (WKUserScript* s in wkWebViewConfig.userContentController.userScripts) {
+      NSLog(@"controller %@", s.source);
+    }
 
     _webView = [[WKWebView alloc] initWithFrame:self.bounds configuration: wkWebViewConfig];
     [self setBackgroundColor: _savedBackgroundColor];
     _webView.scrollView.delegate = self;
+    _webView.scrollView.canCancelContentTouches = YES;
+    _webView.scrollView.delaysContentTouches = YES;
     _webView.UIDelegate = self;
     _webView.navigationDelegate = self;
     _webView.scrollView.scrollEnabled = _scrollEnabled;
@@ -312,6 +362,61 @@ static NSDictionary* customCertificatesForHost;
     [self setKeyboardDisplayRequiresUserAction: _savedKeyboardDisplayRequiresUserAction];
     [self visitSource];
   }
+    UISwipeGestureRecognizer *scroll = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(handleSwipe:)];
+    UILongPressGestureRecognizer *gr = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    //gr.minimumPressDuration = 1.0;
+    gr.delegate = self;
+    scroll.delegate = self;
+    //[_webView.scrollView addGestureRecognizer:gr];
+    //[_webView.scrollView addGestureRecognizer:scroll];
+    //[_webView.scrollView addGestureRecognizer:pan];
+ 
+}
+
+- (void)handleSwipe:(UISwipeGestureRecognizer *)gesture {
+  NSLog(@"***SWIPE");
+}
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+  NSLog(@"***PAN");
+}
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+  NSLog(@"LONG PRESS");
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer
+{
+  //[self removeGestureRecognizers];
+  //for (UIView* view in _webView.subviews) {
+  //    for (UIView* subview in view.subviews) {
+  //      NSLog(@"***AFTERWARDS SUBVIEW %@ WITH GESTURES %@", subview, subview.gestureRecognizers);
+  //    }
+  //}
+
+  //for (UIView* view in _webView.subviews) {
+    NSLog(@"IS SELECTING %d", _isSelecting);
+    NSLog(@"Gesture Recognizer 1 = %@", gestureRecognizer);
+    NSLog(@"Gesture Recognizer 2 = %@ touches = %i", otherGestureRecognizer, otherGestureRecognizer.numberOfTouches);
+    NSString *className = @"UITapGestureRecognizer";
+    NSString *secondClassName = @"UITapAndAHalfRecognizer";
+    NSString *thirdClassName = @"WKSyntheticTapGestureRecognizer";
+    //if (_isSelecting) {
+    //  return YES;
+    //}
+    
+    if ([NSStringFromClass([otherGestureRecognizer class]) isEqual:className]) {
+      return NO;
+    }
+    else if ([NSStringFromClass([otherGestureRecognizer class]) isEqual:secondClassName]) {
+      return NO;
+    }
+    else if ([NSStringFromClass([otherGestureRecognizer class]) isEqual:thirdClassName]) {
+      return NO;
+    }
+    else {
+      return YES;
+    }
 }
 
 // Update webview property when the component prop changes.
@@ -423,6 +528,11 @@ static NSDictionary* customCertificatesForHost;
 }
 #endif
 
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view
+{
+  NSLog(@"SHOULD CANCEL?");
+  return YES;
+}
 /**
  * This method is called whenever JavaScript running within the web view calls:
  *   - window.webkit.messageHandlers[MessageHandlerName].postMessage
@@ -430,13 +540,31 @@ static NSDictionary* customCertificatesForHost;
 - (void)userContentController:(WKUserContentController *)userContentController
        didReceiveScriptMessage:(WKScriptMessage *)message
 {
+  NSLog(@"***EVENT %@", message.name);
   if ([message.name isEqualToString:HistoryShimName]) {
     if (_onLoadingFinish) {
       NSMutableDictionary<NSString *, id> *event = [self baseEvent];
       [event addEntriesFromDictionary: @{@"navigationType": message.body}];
       _onLoadingFinish(event);
     }
+  } else if ([message.name isEqualToString:SelectHandlerName]) {
+    NSLog(@"BEFORE PARSE");
+    NSData *jsonData = [message.body dataUsingEncoding:NSUTF8StringEncoding];
+    NSError *error = nil;
+    id object = [NSJSONSerialization
+                      JSONObjectWithData:jsonData
+                      options:0
+                      error:&error];
+    NSLog(@"OBJECT %@", object);
+    _isSelecting = [object[@"value"] length] != 0;
+    NSLog(@"EVENT BODY %@", message.body);
+    if (_onMessage) {
+      NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+      [event addEntriesFromDictionary: @{@"data": message.body}];
+      _onMessage(event);
+    }
   } else if ([message.name isEqualToString:MessageHandlerName]) {
+    NSLog(@"EVENT WITH MESSAGE %@", [message.body class]);
     if (_onMessage) {
       NSMutableDictionary<NSString *, id> *event = [self baseEvent];
       [event addEntriesFromDictionary: @{@"data": message.body}];
@@ -685,6 +813,7 @@ static NSDictionary* customCertificatesForHost;
 
 - (void)postMessage:(NSString *)message
 {
+  NSLog(@"***POST %@", message);
   NSDictionary *eventInitDict = @{@"data": message};
   NSString *source = [NSString
     stringWithFormat:@"window.dispatchEvent(new MessageEvent('message', %@));",
